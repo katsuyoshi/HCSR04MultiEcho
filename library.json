@@ -1,0 +1,18 @@
+{
+  "name": "HCSR04MultiEcho",
+  "version": "0.1.0",
+  "description": "HC-SR04 multi-echo detector via LM324 analog tap and software envelope detection",
+  "keywords": "ultrasonic, hc-sr04, multi-echo, analog, envelope, distance",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/katsuyoshi/HCSR04MultiEcho.git"
+  },
+  "authors": [
+    {
+      "name": "katsuyoshi"
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}
