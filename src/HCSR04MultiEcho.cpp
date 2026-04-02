@@ -6,12 +6,10 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
     , _captureUs(30000)
     , _envelopeWindow(5)
     , _noiseThreshold(500)
-    , _txDetectThreshold(500)
-    , _txSearchLimitUs(3000)
     , _txFallbackUs(1500)
     , _minEchoGap(20)
     , _speedOfSound(0.0343f)
-    , _envelopeSmoothing(0)
+    , _envelopeSmoothing(5)
     , _useDMA(false)
     , _dmaSampleRate(0)
     , _dmaSamplePeriodUs(0)
@@ -19,6 +17,12 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
     , _txPeakUs(0)
     , _txEndUs(0)
     , _echoCount(0)
+    , _medianSize(13)
+    , _medianIdx(0)
+    , _medianCount(0)
+    , _bestEchoIndex(-1)
+    , _rawDistance(NAN)
+    , _filteredDistance(NAN)
 {
 }
 
@@ -69,12 +73,16 @@ void HCSR04MultiEcho::beginDMA(uint32_t sampleRate) {
 void HCSR04MultiEcho::setCaptureTime(uint32_t us)       { _captureUs = us; }
 void HCSR04MultiEcho::setEnvelopeWindow(int window)      { _envelopeWindow = window; }
 void HCSR04MultiEcho::setNoiseThreshold(uint16_t val)    { _noiseThreshold = val; }
-void HCSR04MultiEcho::setTxDetectThreshold(uint16_t val) { _txDetectThreshold = val; }
-void HCSR04MultiEcho::setTxSearchLimit(uint32_t us)      { _txSearchLimitUs = us; }
 void HCSR04MultiEcho::setTxFallback(uint32_t us)         { _txFallbackUs = us; }
 void HCSR04MultiEcho::setMinEchoGap(int gap)             { _minEchoGap = gap; }
 void HCSR04MultiEcho::setSpeedOfSound(float v)           { _speedOfSound = v; }
+void HCSR04MultiEcho::setTemperature(float celsius)      { _speedOfSound = (331.3f + 0.606f * celsius) / 10000.0f; }
 void HCSR04MultiEcho::setEnvelopeSmoothing(int window)    { _envelopeSmoothing = window; }
+
+void HCSR04MultiEcho::setMedianFilterSize(int size) {
+    _medianSize = (size > HCSR04_MAX_MEDIAN) ? HCSR04_MAX_MEDIAN : size;
+    resetFilter();
+}
 
 // 測定実行
 int HCSR04MultiEcho::capture() {
@@ -110,6 +118,25 @@ int HCSR04MultiEcho::capture() {
         findEchoes();
     }
 
+    // 最大振幅エコーの選択 + 中央値フィルタ
+    if (_echoCount > 0) {
+        _bestEchoIndex = 0;
+        for (int i = 1; i < _echoCount; i++) {
+            if (_echoes[i].amplitude > _echoes[_bestEchoIndex].amplitude)
+                _bestEchoIndex = i;
+        }
+        _rawDistance = _echoes[_bestEchoIndex].distance_cm;
+        if (_medianSize > 0) {
+            _filteredDistance = updateMedian(_rawDistance);
+        } else {
+            _filteredDistance = _rawDistance;
+        }
+    } else {
+        _bestEchoIndex = -1;
+        _rawDistance = NAN;
+        // エコーなし時はフィルタに値を入れない
+    }
+
     return _echoCount;
 }
 
@@ -122,6 +149,18 @@ const Echo& HCSR04MultiEcho::getEcho(int index) const {
 
 uint32_t HCSR04MultiEcho::getTxPeakUs() const { return _txPeakUs; }
 uint32_t HCSR04MultiEcho::getTxEndUs() const  { return _txEndUs; }
+
+// 距離取得
+float HCSR04MultiEcho::getDistance() const        { return _filteredDistance; }
+float HCSR04MultiEcho::getRawDistance() const      { return _rawDistance; }
+int   HCSR04MultiEcho::getBestEchoIndex() const    { return _bestEchoIndex; }
+bool  HCSR04MultiEcho::isFilterReady() const       { return _medianCount >= _medianSize; }
+
+void HCSR04MultiEcho::resetFilter() {
+    _medianIdx = 0;
+    _medianCount = 0;
+    _filteredDistance = NAN;
+}
 
 // 生データアクセス
 uint32_t        HCSR04MultiEcho::getSampleCount() const { return _numCaptured; }
@@ -235,33 +274,22 @@ void HCSR04MultiEcho::extractEnvelope() {
     }
 }
 
-// ===== TX バースト検出 =====
-// _txPeakUs: TXバーストピーク時刻 (距離計算基準)
-// _txEndUs:  残響終了時刻 (ブランキング用)
-void HCSR04MultiEcho::findTxEnd() {
-    _txPeakUs = _txFallbackUs / 2;
-    _txEndUs  = _txFallbackUs;
-    bool in_tx = false;
-    uint16_t txPeakVal = 0;
+// ===== 中央値フィルタ =====
+float HCSR04MultiEcho::updateMedian(float val) {
+    _medianBuf[_medianIdx] = val;
+    _medianIdx = (_medianIdx + 1) % _medianSize;
+    if (_medianCount < _medianSize) _medianCount++;
 
-    for (uint32_t i = 0; i < _numCaptured; i++) {
-        if (_timestamps[i] > _txSearchLimitUs) break;
-
-        if (!in_tx && _envelope[i] > _txDetectThreshold) {
-            in_tx = true;
-            txPeakVal = _envelope[i];
-            _txPeakUs = _timestamps[i];
-        } else if (in_tx) {
-            if (_envelope[i] > txPeakVal) {
-                txPeakVal = _envelope[i];
-                _txPeakUs = _timestamps[i];
-            }
-            if (_envelope[i] < _txDetectThreshold / 2) {
-                _txEndUs = _timestamps[i];
-                break;
+    float sorted[HCSR04_MAX_MEDIAN];
+    for (int i = 0; i < _medianCount; i++) sorted[i] = _medianBuf[i];
+    for (int i = 0; i < _medianCount - 1; i++) {
+        for (int j = i + 1; j < _medianCount; j++) {
+            if (sorted[j] < sorted[i]) {
+                float t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t;
             }
         }
     }
+    return sorted[_medianCount / 2];
 }
 
 // ===== エンベロープからマルチエコー検出 =====
