@@ -30,8 +30,7 @@ class HCSR04MultiEcho {
 public:
     HCSR04MultiEcho(int trigPin, int analogPin);
 
-    // 初期化 (pinMode, ADC設定)
-    void begin(int resolution = 12);
+    // 初期化 (ADC DMA サンプリング)
     void beginDMA(uint32_t sampleRate = 83333);
 
     // パラメータ設定
@@ -81,7 +80,6 @@ private:
     int      _slopeConfirmCount;  // 連続確認サンプル数 (default 3)
 
     // DMA設定
-    bool     _useDMA;
     uint32_t _dmaSampleRate;
     float    _dmaSamplePeriodUs;
 
@@ -106,7 +104,6 @@ private:
     // 内部処理
     void  sendTrigger();
     void  captureWaveform();
-    void  captureWaveformDMA();
     void  extractEnvelope();
     int   findEchoes();
     float updateMedian(float val);

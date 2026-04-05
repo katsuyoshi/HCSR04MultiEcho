@@ -10,7 +10,6 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
     , _envelopeSmoothing(5)
     , _slopeThreshold(30)
     , _slopeConfirmCount(3)
-    , _useDMA(false)
     , _dmaSampleRate(0)
     , _dmaSamplePeriodUs(0)
     , _numCaptured(0)
@@ -25,18 +24,10 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
 {
 }
 
-void HCSR04MultiEcho::begin(int resolution) {
-    pinMode(_trigPin, OUTPUT);
-    digitalWrite(_trigPin, LOW);
-    analogReadResolution(resolution);
-    analogSetAttenuation(ADC_11db);
-}
-
 void HCSR04MultiEcho::beginDMA(uint32_t sampleRate) {
     pinMode(_trigPin, OUTPUT);
     digitalWrite(_trigPin, LOW);
 
-    _useDMA = true;
     _dmaSampleRate = sampleRate;
     _dmaSamplePeriodUs = 1000000.0f / sampleRate;
 
@@ -186,30 +177,8 @@ void HCSR04MultiEcho::sendTrigger() {
     digitalWrite(_trigPin, LOW);
 }
 
-// ===== 波形キャプチャ (analogRead or DMA) =====
-void HCSR04MultiEcho::captureWaveform() {
-    if (_useDMA) {
-        captureWaveformDMA();
-        return;
-    }
-
-    sendTrigger();
-
-    uint32_t t0 = micros();
-    uint32_t i = 0;
-
-    while (i < HCSR04_MAX_SAMPLES) {
-        uint32_t now = micros();
-        if ((now - t0) >= _captureUs) break;
-        _waveform[i] = analogRead(_analogPin);
-        _timestamps[i] = now - t0;
-        i++;
-    }
-    _numCaptured = i;
-}
-
 // ===== DMA波形キャプチャ =====
-void HCSR04MultiEcho::captureWaveformDMA() {
+void HCSR04MultiEcho::captureWaveform() {
     _numCaptured = 0;
 
     esp_err_t ret = adc_digi_start();

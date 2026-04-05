@@ -101,14 +101,6 @@ void loop() {
 }
 ```
 
-### analogRead モード
-
-DMA を使わず `analogRead()` でサンプリングするモードも利用できます。実効サンプリングレートは ~16.5kHz となり精度は低下します。
-
-```cpp
-sensor.begin();  // analogRead モード
-```
-
 ## API
 
 ### コンストラクタ
@@ -121,8 +113,7 @@ HCSR04MultiEcho(int trigPin, int analogPin)
 
 | メソッド | 説明 |
 |---|---|
-| `beginDMA(sampleRate)` | DMA モード初期化。sampleRate はデフォルト 83333 (83.3kHz) |
-| `begin(resolution)` | analogRead モード初期化。resolution はデフォルト 12bit |
+| `beginDMA(sampleRate)` | ADC DMA 初期化。sampleRate はデフォルト 83333 (83.3kHz) |
 
 ### パラメータ設定
 
