@@ -12,27 +12,21 @@ void setup() {
     uint32_t t0 = millis();
     while (!Serial && (millis() - t0) < 3000) delay(10);
 
-    sensor.begin();
-    Serial.println("=== Simple Distance (Strongest Echo) ===");
+    sensor.beginDMA();             // 83.3kHz DMA サンプリング
+    sensor.setCaptureTime(12000);  // 12ms (最大約1.2m)
+
+    Serial.println("=== Simple Distance ===");
 }
 
 void loop() {
     int count = sensor.capture();
 
     if (count > 0) {
-        // 最大振幅のエコーを探す
-        int best = 0;
-        for (int i = 1; i < count; i++) {
-            if (sensor.getEcho(i).amplitude > sensor.getEcho(best).amplitude) {
-                best = i;
-            }
-        }
-        const Echo& e = sensor.getEcho(best);
-        Serial.printf("Distance: %.1f cm  (amp=%u, echoes=%d)\n",
-                      e.distance_cm, e.amplitude, count);
+        Serial.printf("Distance: %.1f cm  (raw=%.1f, echoes=%d)\n",
+                      sensor.getDistance(), sensor.getRawDistance(), count);
     } else {
         Serial.println("No echo detected");
     }
 
-    delay(200);
+    delay(100);
 }

@@ -36,9 +36,7 @@ public:
 
     // パラメータ設定
     void setCaptureTime(uint32_t us);
-    void setEnvelopeWindow(int window);
     void setNoiseThreshold(uint16_t val);
-    void setTxFallback(uint32_t us);
     void setMinEchoGap(int gap);
     void setSpeedOfSound(float v);
     void setTemperature(float celsius);  // 温度(℃)から音速を設定
@@ -52,18 +50,16 @@ public:
     int capture();
 
     // 結果取得
-    int           getEchoCount() const;
+    int           getEchoCount() const;    // TX除外後のエコー数
     const Echo&   getEcho(int index) const;
-    uint32_t      getTxPeakUs() const;
-    uint32_t      getTxEndUs() const;
+    uint32_t      getTxTimeUs() const;     // TX バースト検出時刻 (μs), 未検出時 0
 
-    // 距離取得 (最大振幅エコー基準)
+    // 距離取得 (最大スロープエコー基準)
     float getDistance() const;         // フィルタ後 (無効時は生値)。エコーなし: NAN
     float getRawDistance() const;      // 生値。エコーなし: NAN
-    int   getBestEchoIndex() const;    // 最大振幅エコーのインデックス (-1=なし)
+    int   getBestEchoIndex() const;    // 最大スロープエコーのインデックス (-1=なし)
     bool  isFilterReady() const;       // フィルタバッファが満杯か
     void  resetFilter();
-    float getTxOffsetCm() const;       // トリガー→TXバースト間のオフセット距離 (cm)
 
     // 生データアクセス (CSV出力・Teleplot等に使用)
     uint32_t        getSampleCount() const;
@@ -77,9 +73,7 @@ private:
 
     // パラメータ (デフォルト値はコンストラクタで設定)
     uint32_t _captureUs;
-    int      _envelopeWindow;
     uint16_t _noiseThreshold;
-    uint32_t _txFallbackUs;
     int      _minEchoGap;
     float    _speedOfSound;
     int      _envelopeSmoothing;
@@ -96,8 +90,7 @@ private:
     uint32_t _timestamps[HCSR04_MAX_SAMPLES];
     uint16_t _envelope[HCSR04_MAX_SAMPLES];
     uint32_t _numCaptured;
-    uint32_t _txPeakUs;
-    uint32_t _txEndUs;
+    uint32_t _txTimeUs;
     Echo     _echoes[HCSR04_MAX_ECHOES];
     int      _echoCount;
 
@@ -109,7 +102,6 @@ private:
     int   _bestEchoIndex;
     float _rawDistance;
     float _filteredDistance;
-    float _txOffsetCm;
 
     // 内部処理
     void  sendTrigger();

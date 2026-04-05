@@ -1,7 +1,7 @@
 {
   "name": "HCSR04MultiEcho",
-  "version": "0.1.0",
-  "description": "HC-SR04 multi-echo detector via LM324 analog tap and software envelope detection",
+  "version": "0.2.0",
+  "description": "HC-SR04 multi-echo detector via LM324 analog tap with slope-based echo detection and TX burst auto-detection",
   "keywords": "ultrasonic, hc-sr04, multi-echo, analog, envelope, distance",
   "repository": {
     "type": "git",
