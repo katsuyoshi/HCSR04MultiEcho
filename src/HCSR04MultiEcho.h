@@ -21,6 +21,7 @@
 struct Echo {
     float    distance_cm;
     uint16_t amplitude;
+    int16_t  max_slope;    // 立ち上がり最大スロープ
     uint16_t sample_idx;
     uint32_t time_us;      // TXピークからの相対時間
 };
@@ -43,6 +44,8 @@ public:
     void setTemperature(float celsius);  // 温度(℃)から音速を設定
     void setEnvelopeSmoothing(int window);
     void setMedianFilterSize(int size);  // デフォルト13, 0=無効, 1-HCSR04_MAX_MEDIAN
+    void setSlopeThreshold(uint16_t val);
+    void setSlopeConfirmCount(int count);
 
     // 測定実行 (トリガー → キャプチャ → エンベロープ → エコー検出 → フィルタ)
     // returns echo_count
@@ -60,6 +63,7 @@ public:
     int   getBestEchoIndex() const;    // 最大振幅エコーのインデックス (-1=なし)
     bool  isFilterReady() const;       // フィルタバッファが満杯か
     void  resetFilter();
+    float getTxOffsetCm() const;       // トリガー→TXバースト間のオフセット距離 (cm)
 
     // 生データアクセス (CSV出力・Teleplot等に使用)
     uint32_t        getSampleCount() const;
@@ -79,6 +83,8 @@ private:
     int      _minEchoGap;
     float    _speedOfSound;
     int      _envelopeSmoothing;
+    uint16_t _slopeThreshold;     // スロープ閾値 (default 30)
+    int      _slopeConfirmCount;  // 連続確認サンプル数 (default 3)
 
     // DMA設定
     bool     _useDMA;
@@ -103,6 +109,7 @@ private:
     int   _bestEchoIndex;
     float _rawDistance;
     float _filteredDistance;
+    float _txOffsetCm;
 
     // 内部処理
     void  sendTrigger();

@@ -10,6 +10,8 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
     , _minEchoGap(20)
     , _speedOfSound(0.0343f)
     , _envelopeSmoothing(5)
+    , _slopeThreshold(30)
+    , _slopeConfirmCount(3)
     , _useDMA(false)
     , _dmaSampleRate(0)
     , _dmaSamplePeriodUs(0)
@@ -23,6 +25,7 @@ HCSR04MultiEcho::HCSR04MultiEcho(int trigPin, int analogPin)
     , _bestEchoIndex(-1)
     , _rawDistance(NAN)
     , _filteredDistance(NAN)
+    , _txOffsetCm(0)
 {
 }
 
@@ -41,8 +44,8 @@ void HCSR04MultiEcho::beginDMA(uint32_t sampleRate) {
     _dmaSampleRate = sampleRate;
     _dmaSamplePeriodUs = 1000000.0f / sampleRate;
 
-    // ESP32-S3: GPIO1-10 → ADC1_CH0-CH9
-    int ch = _analogPin - 1;
+    // ESP32-C3: GPIO0-4 → ADC1_CH0-CH4
+    int ch = _analogPin;
 
     adc_digi_init_config_t dma_cfg = {};
     dma_cfg.max_store_buf_size = 16384;
@@ -78,6 +81,8 @@ void HCSR04MultiEcho::setMinEchoGap(int gap)             { _minEchoGap = gap; }
 void HCSR04MultiEcho::setSpeedOfSound(float v)           { _speedOfSound = v; }
 void HCSR04MultiEcho::setTemperature(float celsius)      { _speedOfSound = (331.3f + 0.606f * celsius) / 10000.0f; }
 void HCSR04MultiEcho::setEnvelopeSmoothing(int window)    { _envelopeSmoothing = window; }
+void HCSR04MultiEcho::setSlopeThreshold(uint16_t val)     { _slopeThreshold = val; }
+void HCSR04MultiEcho::setSlopeConfirmCount(int count)     { _slopeConfirmCount = count; }
 
 void HCSR04MultiEcho::setMedianFilterSize(int size) {
     _medianSize = (size > HCSR04_MAX_MEDIAN) ? HCSR04_MAX_MEDIAN : size;
@@ -89,40 +94,25 @@ int HCSR04MultiEcho::capture() {
     captureWaveform();
     extractEnvelope();
 
-    // 1st pass: ブランキングなしで全ピーク検出
-    _txPeakUs = 0;
-    _txEndUs = 0;
-    findEchoes();
-
-    if (_echoCount > 0) {
-        // 最初のピーク = TXバースト
-        uint16_t txIdx = _echoes[0].sample_idx;
-        _txPeakUs = _timestamps[txIdx];
-
-        // TX終了: ピーク以降でエンベロープが _minEchoGap 連続で閾値以下
-        _txEndUs = _timestamps[txIdx] + _txFallbackUs;  // フォールバック
-        int lowCount = 0;
-        for (uint32_t i = txIdx; i < _numCaptured; i++) {
-            if (_envelope[i] < _noiseThreshold / 2) {
-                lowCount++;
-                if (lowCount >= _minEchoGap) {
-                    _txEndUs = _timestamps[i - _minEchoGap + 1];
-                    break;
-                }
-            } else {
-                lowCount = 0;
-            }
+    // TX バーストのオフセット計算 (低閾値でスキャン)
+    _txOffsetCm = 0;
+    for (uint32_t i = 0; i < _numCaptured; i++) {
+        if (_envelope[i] > 150) {  // バースト検出閾値 (~0.1V)
+            _txOffsetCm = _timestamps[i] * _speedOfSound / 2.0f;
+            break;
         }
-
-        // 2nd pass: TX後のエコーのみ検出
-        findEchoes();
     }
+
+    // 基準はトリガー=0、TX ブランキングは固定値
+    _txPeakUs = 0;
+    _txEndUs = _txFallbackUs;
+    findEchoes();
 
     // 最大振幅エコーの選択 + 中央値フィルタ
     if (_echoCount > 0) {
         _bestEchoIndex = 0;
         for (int i = 1; i < _echoCount; i++) {
-            if (_echoes[i].amplitude > _echoes[_bestEchoIndex].amplitude)
+            if (_echoes[i].max_slope > _echoes[_bestEchoIndex].max_slope)
                 _bestEchoIndex = i;
         }
         _rawDistance = _echoes[_bestEchoIndex].distance_cm;
@@ -155,6 +145,7 @@ float HCSR04MultiEcho::getDistance() const        { return _filteredDistance; }
 float HCSR04MultiEcho::getRawDistance() const      { return _rawDistance; }
 int   HCSR04MultiEcho::getBestEchoIndex() const    { return _bestEchoIndex; }
 bool  HCSR04MultiEcho::isFilterReady() const       { return _medianCount >= _medianSize; }
+float HCSR04MultiEcho::getTxOffsetCm() const       { return _txOffsetCm; }
 
 void HCSR04MultiEcho::resetFilter() {
     _medianIdx = 0;
@@ -234,25 +225,27 @@ void HCSR04MultiEcho::captureWaveformDMA() {
     adc_digi_stop();
 }
 
-// ===== ソフトウェアエンベロープ抽出 =====
-// スライディングウィンドウ内の max - min でキャリア振幅を推定
-// _envelopeSmoothing > 0 の場合、移動平均でスムージング
+// ===== ソフトウェアエンベロープ抽出 (全波整流方式) =====
+// 1. DC オフセット推定 (全サンプル平均)
+// 2. DC 除去 + 全波整流: |raw[i] - dc_offset|
+// 3. LPF (移動平均) でエンベロープ平滑化
 void HCSR04MultiEcho::extractEnvelope() {
-    int half = _envelopeWindow / 2;
+    if (_numCaptured == 0) return;
+
+    // 1. DC オフセット推定
+    uint32_t dcSum = 0;
     for (uint32_t i = 0; i < _numCaptured; i++) {
-        uint16_t vmin = 4095, vmax = 0;
-        int start = (int)i - half;
-        int end   = (int)i + half;
-        if (start < 0) start = 0;
-        if (end >= (int)_numCaptured) end = _numCaptured - 1;
-        for (int j = start; j <= end; j++) {
-            if (_waveform[j] < vmin) vmin = _waveform[j];
-            if (_waveform[j] > vmax) vmax = _waveform[j];
-        }
-        _envelope[i] = vmax - vmin;
+        dcSum += _waveform[i];
+    }
+    int16_t dcOffset = (int16_t)(dcSum / _numCaptured);
+
+    // 2. DC 除去 + 全波整流
+    for (uint32_t i = 0; i < _numCaptured; i++) {
+        int16_t val = (int16_t)_waveform[i] - dcOffset;
+        _envelope[i] = (uint16_t)(val < 0 ? -val : val);
     }
 
-    // 移動平均スムージング
+    // 3. LPF (移動平均スムージング)
     if (_envelopeSmoothing > 1) {
         int smHalf = _envelopeSmoothing / 2;
         uint16_t* temp = new uint16_t[_numCaptured];
@@ -292,49 +285,95 @@ float HCSR04MultiEcho::updateMedian(float val) {
     return sorted[_medianCount / 2];
 }
 
-// ===== エンベロープからマルチエコー検出 =====
+// ===== エンベロープからマルチエコー検出 (スロープ検出方式) =====
+// スロープ(傾き)でエコー先頭を検出、ノイズフロア到達でエコー終了
+// ダブルローブ(同一エコー内の2つのピーク)は1エコーとして扱う
 int HCSR04MultiEcho::findEchoes() {
     _echoCount = 0;
+    if (_numCaptured < 3) return 0;
+
+    const uint16_t noiseFloor = _noiseThreshold / 4;
+    const uint16_t minAmplitude = _noiseThreshold;
+    const int16_t slopeTh = (int16_t)_slopeThreshold;
+    const int slopeConfirm = _slopeConfirmCount;
+    const int belowRequired = 5;  // ノイズフロア連続サンプル数
+
     bool in_echo = false;
     uint16_t peak = 0;
-    int peak_idx = 0;
-    int gap = _minEchoGap;
+    int16_t  max_slope = 0;  // 立ち上がり最大スロープ
+    int rise_idx = 0;        // スロープ上昇開始インデックス
+    int sustained = 0;       // スロープ閾値超え連続カウント
+    int gap = _minEchoGap;   // 前エコー終了からのギャップ
+    int below_count = 0;     // ノイズフロア以下の連続カウント
 
-    for (uint32_t i = 0; i < _numCaptured && _echoCount < HCSR04_MAX_ECHOES; i++) {
+    for (uint32_t i = 1; i + 1 < _numCaptured && _echoCount < HCSR04_MAX_ECHOES; i++) {
         if (_timestamps[i] < _txEndUs) continue;
 
         uint16_t val = _envelope[i];
 
-        if (!in_echo && val > _noiseThreshold && gap >= _minEchoGap) {
-            in_echo = true;
-            peak = val;
-            peak_idx = i;
-        } else if (in_echo) {
+        // 3点中心差分でスロープ計算 (追加バッファなし)
+        int16_t slope = ((int16_t)_envelope[i + 1] - (int16_t)_envelope[i - 1]) / 2;
+
+        if (!in_echo) {
+            // --- IDLE: スロープ上昇でエコー検出 ---
+            gap++;
+            if (slope >= slopeTh && gap >= _minEchoGap) {
+                sustained++;
+                if (sustained == 1) {
+                    rise_idx = i;  // 上昇開始点を記録
+                    max_slope = slope;
+                }
+                if (slope > max_slope) max_slope = slope;
+                if (sustained >= slopeConfirm) {
+                    // エコー確定
+                    in_echo = true;
+                    peak = val;
+                    below_count = 0;
+                }
+            } else {
+                sustained = 0;
+            }
+        } else {
+            // --- IN_ECHO: ピーク追跡 + ノイズフロアでエコー終了 ---
             if (val > peak) {
                 peak = val;
-                peak_idx = i;
             }
-            if (val < _noiseThreshold / 2) {
-                uint32_t dt = _timestamps[peak_idx] - _txPeakUs;
-                _echoes[_echoCount].time_us     = dt;
-                _echoes[_echoCount].distance_cm = dt * _speedOfSound / 2.0f;
-                _echoes[_echoCount].amplitude   = peak;
-                _echoes[_echoCount].sample_idx  = (uint16_t)peak_idx;
-                _echoCount++;
-                in_echo = false;
-                gap = 0;
+            if (slope > max_slope) max_slope = slope;
+
+            if (val < noiseFloor) {
+                below_count++;
+                if (below_count >= belowRequired) {
+                    // エコー終了 → 記録
+                    if (peak >= minAmplitude) {
+                        uint32_t dt = _timestamps[rise_idx] - _txPeakUs;
+                        _echoes[_echoCount].time_us     = dt;
+                        _echoes[_echoCount].distance_cm = dt * _speedOfSound / 2.0f;
+                        _echoes[_echoCount].amplitude   = peak;
+                        _echoes[_echoCount].max_slope   = max_slope;
+                        _echoes[_echoCount].sample_idx  = (uint16_t)rise_idx;
+                        _echoCount++;
+                    }
+                    in_echo = false;
+                    peak = 0;
+                    max_slope = 0;
+                    gap = 0;
+                    sustained = 0;
+                    below_count = 0;
+                }
+            } else {
+                below_count = 0;
             }
         }
-        if (!in_echo) gap++;
     }
 
     // バッファ末尾まで続くエコー
-    if (in_echo && _echoCount < HCSR04_MAX_ECHOES) {
-        uint32_t dt = _timestamps[peak_idx] - _txPeakUs;
+    if (in_echo && _echoCount < HCSR04_MAX_ECHOES && peak >= minAmplitude) {
+        uint32_t dt = _timestamps[rise_idx] - _txPeakUs;
         _echoes[_echoCount].time_us     = dt;
         _echoes[_echoCount].distance_cm = dt * _speedOfSound / 2.0f;
         _echoes[_echoCount].amplitude   = peak;
-        _echoes[_echoCount].sample_idx  = (uint16_t)peak_idx;
+        _echoes[_echoCount].max_slope   = max_slope;
+        _echoes[_echoCount].sample_idx  = (uint16_t)rise_idx;
         _echoCount++;
     }
 
